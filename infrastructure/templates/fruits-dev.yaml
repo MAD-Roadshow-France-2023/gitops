@@ -41,14 +41,15 @@ kind: Role
 metadata:
   annotations:
     argocd.argoproj.io/sync-wave: "20"
-  name: secret-reader
+  name: secret-manager
   namespace: fruits-dev
 rules:
 - apiGroups: [""]
   resources: ["secrets"]
-  verbs: ["get", "list", "watch"]
+  verbs: ["create", "get", "list", "watch", "update", "patch", "delete"]
 ---
-# The stackrox hook needs to be able to read the cosign public key in order to create the sigstore policy
+# The stackrox hook needs to be able to read the cosign public key in order to create the sigstore policy.
+# It also needs to create a secret with the CI/CD API Token to contact the central.
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding
 metadata:
@@ -59,7 +60,7 @@ metadata:
 roleRef:
   apiGroup: rbac.authorization.k8s.io
   kind: Role
-  name: secret-reader
+  name: secret-manager
 subjects:
 - kind: ServiceAccount
   name: stackrox-hook
@@ -208,6 +209,68 @@ spec:
     - name: COSIGN_PASSWORD
       value: "$(params.cosignKeyPassword)"
 ---
+apiVersion: tekton.dev/v1beta1
+kind: Task
+metadata:
+  annotations:
+    argocd.argoproj.io/sync-wave: "20"
+    argocd.argoproj.io/sync-options: SkipDryRunOnMissingResource=true
+  name: roxctl-image-check
+  namespace: fruits-dev
+spec:
+  params:
+  - description: >-
+      Secret containing the StackRox API token with CI permissions and the
+      address:port tuple for StackRox Central (example: rox.stackrox.io:443)
+    name: roxctlSecret
+    type: string
+  - description: Bypass Central's cache for the image and force a new pull from the Scanner
+    name: forcePull
+    type: string
+    default: "false"
+  - description: Image name (registry hostname + port + path)
+    name: imageName
+    type: string
+  - description: Image digest
+    name: imageDigest
+    type: string
+  results:
+    - description: Output of `roxctl image check`
+      name: check_output
+  steps:
+    - env:
+      - name: FORCE_PULL
+        value: $(params.forcePull)
+      - name: DIGEST
+        value: $(params.imageDigest)
+      - name: NAME
+        value: $(params.imageName)
+      - name: FORCE_PULL
+        value: $(params.forcePull)
+      - name: ROX_API_TOKEN
+        valueFrom:
+          secretKeyRef:
+            key: token
+            name: $(params.roxctlSecret)
+      - name: ROX_CENTRAL_ENDPOINT
+        valueFrom:
+          secretKeyRef:
+            key: endpoint
+            name: $(params.roxctlSecret)
+      image: quay.io/skopeo/stable:v1.5.2
+      name: roxctl-image-check
+      resources: {}
+      script: |
+        #!/bin/bash
+        set -Eeuo pipefail
+        curl -s -k -L -H "Authorization: Bearer $ROX_API_TOKEN" "https://$ROX_CENTRAL_ENDPOINT/api/cli/download/roxctl-linux" --output /tmp/roxctl  > /dev/null
+        chmod +x /tmp/roxctl
+        extra_args=""
+        if [ "${FORCE_PULL:-}" == "true" ]; then
+          extra_args="$extra_args --force"
+        fi
+        /tmp/roxctl image check --insecure-skip-tls-verify -e "$ROX_CENTRAL_ENDPOINT" --image "$NAME@$DIGEST" --send-notifications $extra_args
+---
 apiVersion: v1
 kind: Secret
 metadata:
@@ -247,7 +310,7 @@ spec:
       name: GIT_REVISION
       type: string
     - default: >-
-        image-registry.openshift-image-registry.svc:5000/fruits-dev/fruits:latest
+        image-registry.openshift-image-registry.svc:5000/fruits-dev/fruits
       name: IMAGE_NAME
       type: string
     - default: .
@@ -291,6 +354,18 @@ spec:
       workspaces:
         - name: source
           workspace: workspace
+    - name: roxctl-image-check
+      taskRef:
+        name: roxctl-image-check
+      runAfter:
+        - build
+      params:
+      - name: roxctlSecret
+        value: stackrox-api-token
+      - name: imageName
+        value: $(params.IMAGE_NAME)
+      - name: imageDigest
+        value: $(tasks.build.results.IMAGE_DIGEST)
     - name: cosign-sign
       params:
       - name: cosignKeyRef
@@ -298,18 +373,32 @@ spec:
       - name: cosignKeyPassword
         value: dummy
       - name: image
-        value: $(params.IMAGE_NAME)
+        value: $(params.IMAGE_NAME)@$(tasks.build.results.IMAGE_DIGEST)
       runAfter:
-        - build
+        - roxctl-image-check
       taskRef:
         kind: Task
         name: cosign-sign
+    - name: roxctl-flush-cache
+      taskRef:
+        name: roxctl-image-check
+      runAfter:
+        - cosign-sign
+      params:
+      - name: roxctlSecret
+        value: stackrox-api-token
+      - name: imageName
+        value: $(params.IMAGE_NAME)
+      - name: imageDigest
+        value: $(tasks.build.results.IMAGE_DIGEST)
+      - name: forcePull
+        value: "true"
     - name: deploy-in-test
       params:
         - name: SCRIPT
-          value: oc delete pods -l deployment=$(params.APP_NAME) -n fruits-test
+          value: oc set image deploy/$(params.APP_NAME) -n fruits-test fruits=$(params.IMAGE_NAME)@$(tasks.build.results.IMAGE_DIGEST)
       runAfter:
-        - cosign-sign
+        - roxctl-flush-cache
       taskRef:
         kind: ClusterTask
         name: openshift-client
@@ -328,7 +417,7 @@ spec:
     - name: deploy-in-prod
       params:
         - name: SCRIPT
-          value: oc delete pods -l deployment=$(params.APP_NAME) -n fruits-prod
+          value: oc set image deploy/$(params.APP_NAME) -n fruits-prod fruits=$(params.IMAGE_NAME)@$(tasks.build.results.IMAGE_DIGEST)
       runAfter:
         - slack-approval
       taskRef:

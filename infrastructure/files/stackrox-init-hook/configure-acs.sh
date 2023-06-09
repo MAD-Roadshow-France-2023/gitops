@@ -48,4 +48,15 @@ if ! oc get secret admission-control-tls -n stackrox &>/dev/null; then
     oc apply -f /tmp/cluster_init_bundle.yaml -n stackrox
 fi
 
+echo "========================================================================"
+echo " Retrieving an API Token with CI/CD scope for Red Hat ACS"
+echo "========================================================================"
+echo
+if ! oc get secret stackrox-api-token -n stackrox &>/dev/null; then
+    POLICY_JSON='{ "name": "cicd-token", "role":"Continuous Integration"}'
+    APIURL="https://$ROX_CENTRAL_ADDRESS/v1/apitokens/generate"
+    ROX_API_TOKEN=$(curl -s -k -u admin:$ROX_ADMIN_PASSWORD -H 'Content-Type: application/json' -X POST -d "$POLICY_JSON" "$APIURL" | jq -r '.token')
+    oc create secret generic stackrox-api-token -n fruits-dev --from-literal=token="$ROX_API_TOKEN" --from-literal=endpoint="$ROX_CENTRAL_ADDRESS"
+fi
+
 exit 0
