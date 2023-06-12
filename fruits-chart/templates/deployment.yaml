@@ -30,13 +30,9 @@ spec:
             value: secret
           - name: QUARKUS_DATASOURCE_JDBC_URL
             value: jdbc:postgresql://database:5432/appli
+{{ end }}
           - name: QUARKUS_HIBERNATE_ORM_SQL_LOAD_SCRIPT
             value: import-prod.sql
-{{ end }}
-{{ if eq .Values.db.deployment "operator" }}
-          - name: QUARKUS_HIBERNATE_ORM_SQL_LOAD_SCRIPT
-            value: import-test.sql
-{{ end }}
           ports:
             - containerPort: 8443
               protocol: TCP
