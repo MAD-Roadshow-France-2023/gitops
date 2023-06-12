@@ -437,3 +437,177 @@ metadata:
 spec:
   lookupPolicy:
     local: false
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  annotations:
+    argocd.argoproj.io/sync-wave: "20"
+  name: shipwright
+  namespace: fruits-dev
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  annotations:
+    argocd.argoproj.io/sync-wave: "20"
+  name: shipwright-privileged-builds
+  namespace: fruits-dev
+rules:
+- apiGroups:
+  - security.openshift.io
+  resourceNames:
+  - privileged
+  resources:
+  - securitycontextconstraints
+  verbs:
+  - use
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  annotations:
+    argocd.argoproj.io/sync-wave: "20"
+  name: shipwright-privileged-builds
+  namespace: fruits-dev
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: shipwright-privileged-builds
+subjects:
+- kind: ServiceAccount
+  name: shipwright
+  namespace: fruits-dev
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  annotations:
+    argocd.argoproj.io/sync-wave: "20"
+  name: shipwright-image-builder
+  namespace: fruits-dev
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: system:image-builder
+subjects:
+- kind: ServiceAccount
+  name: shipwright
+  namespace: fruits-dev
+---
+apiVersion: image.openshift.io/v1
+kind: ImageStream
+metadata:
+  annotations:
+    argocd.argoproj.io/sync-wave: "20"
+  name: helm-repository
+  namespace: fruits-dev
+spec:
+  lookupPolicy:
+    local: false
+---
+apiVersion: shipwright.io/v1alpha1
+kind: Build
+metadata:
+  annotations:
+    argocd.argoproj.io/sync-wave: "25"
+    argocd.argoproj.io/sync-options: SkipDryRunOnMissingResource=true
+    build.shipwright.io/verify.repository: "true"
+  name: helm-repository
+  namespace: fruits-dev
+spec:
+  source:
+    url: https://github.com/MAD-Roadshow-France-2023/gitops.git
+    contextDir: fruits-chart
+    revision: main
+  strategy:
+    name: buildah
+    kind: ClusterBuildStrategy
+  dockerfile: Containerfile
+  output:
+    image: image-registry.openshift-image-registry.svc:5000/fruits-dev/helm-repository
+---
+apiVersion: shipwright.io/v1alpha1
+kind: BuildRun
+metadata:
+  annotations:
+    argocd.argoproj.io/sync-wave: "30"
+    argocd.argoproj.io/sync-options: SkipDryRunOnMissingResource=true
+  name: helm-repository-build
+  namespace: fruits-dev
+spec:
+  buildRef:
+    name: helm-repository
+  serviceAccount:
+    name: shipwright
+---
+kind: Deployment
+apiVersion: apps/v1
+metadata:
+  annotations:
+    argocd.argoproj.io/sync-wave: "35"
+  name: helm-repository
+  namespace: fruits-dev
+  labels:
+    app: helm-repository
+    app.kubernetes.io/component: nginx
+    app.kubernetes.io/instance: helm-repository
+    app.kubernetes.io/name: helm-repository
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      deployment: helm-repository
+  template:
+    metadata:
+      creationTimestamp: null
+      labels:
+        deployment: helm-repository
+    spec:
+      containers:
+        - resources: {}
+          terminationMessagePath: /dev/termination-log
+          name: nginx
+          ports:
+            - containerPort: 8443
+              protocol: TCP
+            - containerPort: 8080
+              protocol: TCP
+          imagePullPolicy: Always
+          terminationMessagePolicy: File
+          image: image-registry.openshift-image-registry.svc:5000/fruits-dev/helm-repository:latest
+      restartPolicy: Always
+      terminationGracePeriodSeconds: 30
+      dnsPolicy: ClusterFirst
+      securityContext: {}
+      schedulerName: default-scheduler
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 25%
+      maxSurge: 25%
+  revisionHistoryLimit: 10
+  progressDeadlineSeconds: 600
+---
+kind: Service
+apiVersion: v1
+metadata:
+  annotations:
+    argocd.argoproj.io/sync-wave: "35"
+  name: helm-repository
+  namespace: fruits-dev
+  labels:
+    app: helm-repository
+    app.kubernetes.io/component: nginx
+    app.kubernetes.io/instance: helm-repository
+    app.kubernetes.io/name: helm-repository
+spec:
+  ports:
+    - name: 8080-tcp
+      protocol: TCP
+      port: 8080
+      targetPort: 8080
+  type: ClusterIP
+  sessionAffinity: None
+  selector:
+    deployment: helm-repository

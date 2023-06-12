@@ -2,9 +2,12 @@ apiVersion: helm.openshift.io/v1beta1
 kind: HelmChartRepository
 metadata:
   annotations:
-    argocd.argoproj.io/sync-wave: "20"
+    # This object has to be created after completion of the Shipwright build
+    # that creates the Helm repository image and after successful deployment
+    # of this image.
+    argocd.argoproj.io/sync-wave: "40"
   name: fruits-charts
 spec:
   name: fruits-charts
   connectionConfig:
-    url: https://mad-roadshow-france-2023-helm-charts.s3.eu-west-3.amazonaws.com
+    url: http://helm-repository.fruits-dev.svc:8080
